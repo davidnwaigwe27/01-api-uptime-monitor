@@ -1,0 +1,146 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pulse Monitor | API Uptime Monitor</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="script.js" defer></script>
+</head>
+<body>
+    <div class="app">
+        <aside class="sidebar">
+            <h2>Pulse Monitor</h2>
+            <p class="sidebar-subtitle">API Uptime Monitor</p>
+
+            <nav>
+                <a class="active" href="#overview">Overview</a>
+                <a href="#monitors">Monitors</a>
+                <a href="#history">Check history</a>
+            </nav>
+
+            <div class="connection">
+                <span class="status-dot"></span>
+                <div>
+                    <strong id="connection-status">Waiting for backend</strong>
+                    <p>Service connection</p>
+                </div>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">MONITORING DASHBOARD</p>
+                    <h1>Overview</h1>
+                    <p>Keep track of your websites and API endpoints.</p>
+                </div>
+                <button id="open-form-button">+ Add monitor</button>
+            </header>
+
+            <section id="overview" class="summary-grid">
+                <article class="summary-card">
+                    <p>Total monitors</p>
+                    <h2 id="total-count">0</h2>
+                </article>
+                <article class="summary-card">
+                    <p>Online</p>
+                    <h2 id="up-count">0</h2>
+                </article>
+                <article class="summary-card">
+                    <p>Offline</p>
+                    <h2 id="down-count">0</h2>
+                </article>
+                <article class="summary-card">
+                    <p>Avg. response</p>
+                    <h2 id="avg-response">—</h2>
+                </article>
+            </section>
+
+            <section id="monitors" class="panel">
+                <div class="section-heading">
+                    <div>
+                        <h2>Monitored endpoints</h2>
+                        <p>Your registered websites and APIs</p>
+                    </div>
+                </div>
+
+                <form id="monitor-form" hidden>
+                    <div class="form-grid">
+                        <label>
+                            Monitor name
+                            <input id="monitor-name" name="name"
+                                   placeholder="My website" required>
+                        </label>
+                        <label>
+                            Endpoint URL
+                            <input id="monitor-url" name="url" type="url"
+                                   placeholder="https://example.com" required>
+                        </label>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit">Save monitor</button>
+                        <button type="button" id="cancel-form-button"
+                                class="secondary-button">Cancel</button>
+                    </div>
+                </form>
+
+                <p id="feedback" role="status" aria-live="polite"></p>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Monitor</th>
+                                <th>URL</th>
+                                <th>Status</th>
+                                <th>Last checked</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="monitor-list">
+                            <tr>
+                                <td colspan="5" class="empty-state">
+                                    Loading monitors...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="history" class="panel">
+                <div class="section-heading">
+                    <div>
+                        <h2>Check history</h2>
+                        <p id="history-description">Select a monitor to view its history.</p>
+                    </div>
+                </div>
+
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Checked at</th>
+                                <th>Status</th>
+                                <th>HTTP code</th>
+                                <th>Response time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-list">
+                            <tr>
+                                <td colspan="4" class="empty-state">
+                                    No check history selected.
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <footer>Pulse Monitor · API Uptime Monitor</footer>
+        </main>
+    </div>
+</body>
+</html>
