@@ -1,88 +1,218 @@
+
 import os
-from pathlib import Path
 from contextlib import asynccontextmanager
-from threading import Thread
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel
 from supabase import create_client, Client
 
+from .checker import check_url
+from .scheduler import run_forever
+
+
 # --------------------------------------------------
-# 1. Load environment variables from backend/.env
+# 1. Environment and Supabase configuration
 # --------------------------------------------------
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(BACKEND_DIR / ".env")
+# Load environment variables from the backend directory.
+BASE_DIR = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError(
-        "Missing SUPABASE_URL or SUPABASE_KEY environment variables."
-    )
+supabase: Client | None = None
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def get_db() -> Client:
+    """Return the initialized Supabase client."""
+    if supabase is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection is not initialized.",
+        )
+    return supabase
+
 
 # --------------------------------------------------
-# 2. Start the existing scheduler in the background
+# 2. Start FastAPI and the background scheduler
 # --------------------------------------------------
-
-scheduler_thread = None
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global scheduler_thread
+    global supabase
 
-    from app.scheduler import run_forever
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError(
+            "SUPABASE_URL or SUPABASE_KEY is missing."
+        )
 
-    scheduler_thread = Thread(
-        target=run_forever,
-        daemon=True,
-        name="uptime-monitor-scheduler",
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    app.state.supabase = supabase
+
+    print("Supabase client initialized.")
+
+    # IMPORTANT: run_forever requires the Supabase client.
+    # It starts its own daemon thread and returns immediately.
+    scheduler_thread = run_forever(
+        supabase,
+        interval_seconds=60,
     )
-    scheduler_thread.start()
 
-    yield
+    print("Monitor scheduler started.")
+
+    try:
+        yield
+    finally:
+        print("FastAPI is shutting down.")
 
 
 app = FastAPI(
     title="API Uptime Monitor",
-    description="Monitor API availability and response times.",
+    description="Monitor website availability and browser activity.",
     version="1.0.0",
     lifespan=lifespan,
 )
 
+
 # --------------------------------------------------
-# 3. CORS: allow the deployed Vercel frontend
+# 3. CORS configuration
 # --------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+        "http://localhost:5501",
+        "http://127.0.0.1:5501",
         "https://api-uptime-monitor-frontend.vercel.app",
     ],
+    allow_origin_regex=r"chrome-extension://.*",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 # --------------------------------------------------
 # 4. Request models
 # --------------------------------------------------
 
-
 class MonitorCreate(BaseModel):
     name: str
-    url: HttpUrl
+    url: str
+
+
+class BrowserDomain(BaseModel):
+    domain: str
+    tab_count: int
+
+
+class BrowserActivityUpdate(BaseModel):
+    domains: list[BrowserDomain]
 
 
 # --------------------------------------------------
-# 5. Health check
+# 5. Helpers for website monitors
 # --------------------------------------------------
+
+def monitor_status(monitor_id: int) -> dict:
+    """Get the latest saved check result."""
+
+    response = (
+        get_db()
+        .table("check_results")
+        .select("*")
+        .eq("url_id", monitor_id)
+        .order("checked_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+
+    records = response.data or []
+
+    if not records:
+        return {
+            "current_status": "unknown",
+            "last_checked_at": None,
+            "response_time_ms": None,
+            "status_code": None,
+            "error_type": None,
+            "error_message": None,
+        }
+
+    latest = records[0]
+
+    return {
+        "current_status": (
+            "up" if latest["is_success"] else "down"
+        ),
+        "last_checked_at": latest["checked_at"],
+        "response_time_ms": latest["response_time_ms"],
+        "status_code": latest.get("status_code"),
+        "error_type": latest.get("error_type"),
+        "error_message": latest.get("error_message"),
+    }
+
+
+def format_monitor(monitor: dict) -> dict:
+    """Format a database monitor for the frontend."""
+
+    status = monitor_status(monitor["id"])
+
+    return {
+        "id": monitor["id"],
+        "name": monitor.get("name") or monitor["url"],
+        "url": monitor["url"],
+        "current_status": status["current_status"],
+        "last_checked_at": status["last_checked_at"],
+        "response_time_ms": status["response_time_ms"],
+        "status_code": status["status_code"],
+        "error_type": status["error_type"],
+        "error_message": status["error_message"],
+        "created_at": monitor.get("created_at"),
+    }
+
+
+def validate_monitor_url(url: str) -> str:
+    """Validate URL format before saving it."""
+
+    url = url.strip()
+    parsed = urlparse(url)
+
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(
+            status_code=422,
+            detail="Please enter a valid HTTP or HTTPS URL.",
+        )
+
+    try:
+        port = parsed.port
+        if port is not None and not (1 <= port <= 65535):
+            raise ValueError("Invalid port")
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="The URL contains an invalid port.",
+        )
+
+    return url
+
+
+# --------------------------------------------------
+# 6. Basic endpoints
+# --------------------------------------------------
+
+@app.get("/")
+def home():
+    return {"message": "API Uptime Monitor API is running."}
 
 
 @app.get("/health")
@@ -91,238 +221,347 @@ def health():
 
 
 # --------------------------------------------------
-# 6. List monitors
+# 7. Monitor endpoints
 # --------------------------------------------------
 
-
-@app.get(
-    "/monitors",
-    responses={
-        503: {"description": "Service Unavailable"},
-        500: {"description": "Internal Server Error"},
-    },
-)
+@app.get("/monitors")
 def get_monitors():
+    """Return active monitors with their latest check details."""
+
+    response = (
+        get_db()
+        .table("monitored_urls")
+        .select("*")
+        .eq("is_active", True)
+        .order("id")
+        .execute()
+    )
+
+    return [
+        format_monitor(monitor)
+        for monitor in (response.data or [])
+    ]
+
+
+@app.post("/monitors", status_code=201)
+def create_monitor(payload: MonitorCreate):
+    """Register a website to monitor."""
+
+    name = payload.name.strip()
+    url = validate_monitor_url(payload.url)
+
+    if not name:
+        raise HTTPException(
+            status_code=422,
+            detail="Monitor name cannot be empty.",
+        )
+
+    db = get_db()
+
+    # Check for an already-registered URL.
+    existing = (
+        db.table("monitored_urls")
+        .select("id")
+        .eq("url", url)
+        .limit(1)
+        .execute()
+    )
+
+    if existing.data:
+        raise HTTPException(
+            status_code=409,
+            detail="This URL is already registered.",
+        )
+
     try:
         response = (
-            supabase.table("monitored_urls")
-            .select("*")
-            .order("created_at", desc=True)
+            db.table("monitored_urls")
+            .insert({
+                "name": name,
+                "url": url,
+                "is_active": True,
+            })
             .execute()
         )
-
-        monitors = []
-
-        for item in response.data or []:
-            monitors.append(
-                {
-                    "id": item["id"],
-                    "name": item.get("name", item.get("url", "")),
-                    "url": item["url"],
-                    "current_status": "unknown",
-                    "last_checked_at": None,
-                    "created_at": item.get("created_at"),
-                }
-            )
-
-        # Get each monitor's most recent check result.
-        for monitor in monitors:
-            results = (
-                supabase.table("check_results")
-                .select("*")
-                .eq("url_id", monitor["id"])
-                .order("checked_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-
-            if results.data:
-                latest = results.data[0]
-                monitor["current_status"] = (
-                    "up" if latest.get("is_success") else "down"
-                )
-                monitor["last_checked_at"] = latest.get("checked_at")
-
-        return monitors
-
     except Exception as exc:
-        print(f"GET /monitors failed: {exc}")
-        raise HTTPException(
-            status_code=500,
-            detail="Could not retrieve monitors.",
-        )
+        message = str(exc).lower()
 
-
-# --------------------------------------------------
-# 7. Create a monitor
-# --------------------------------------------------
-
-
-@app.post(
-    "/monitors",
-    status_code=status.HTTP_201_CREATED,
-    responses={
-        409: {"description": "URL already registered."},
-        500: {"description": "Monitor could not be created."},
-    },
-)
-def create_monitor(monitor: MonitorCreate):
-    url = str(monitor.url).rstrip("/")
-
-    try:
-        existing = (
-            supabase.table("monitored_urls")
-            .select("id")
-            .eq("url", url)
-            .limit(1)
-            .execute()
-        )
-
-        if existing.data:
+        if "23505" in message or "duplicate key" in message:
             raise HTTPException(
                 status_code=409,
-                detail="URL already registered.",
+                detail="This URL is already registered.",
             )
 
-        response = (
-            supabase.table("monitored_urls")
-            .insert(
-                {
-                    "name": monitor.name.strip(),
-                    "url": url,
-                    "is_active": True,
-                }
-            )
-            .execute()
-        )
-
-        if not response.data:
-            raise HTTPException(
-                status_code=500,
-                detail="Monitor could not be created.",
-            )
-
-        item = response.data[0]
-
-        return {
-            "id": item["id"],
-            "name": item.get("name", monitor.name),
-            "url": item["url"],
-            "current_status": "unknown",
-            "last_checked_at": None,
-            "created_at": item.get("created_at"),
-        }
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        print(f"POST /monitors failed: {exc}")
+        print(f"Could not create monitor: {exc}")
         raise HTTPException(
             status_code=500,
-            detail="Could not create monitor.",
+            detail="Could not create monitor. Check backend logs.",
         )
 
+    if not response.data:
+        raise HTTPException(
+            status_code=500,
+            detail="The monitor could not be saved.",
+        )
 
-# --------------------------------------------------
-# 8. Delete a monitor
-# --------------------------------------------------
+    return format_monitor(response.data[0])
 
 
-@app.delete(
-    "/monitors/{monitor_id}",
-    responses={
-        404: {"description": "Monitor not found."},
-        500: {"description": "Could not delete monitor."},
-    },
-)
+@app.post("/monitors/{monitor_id}/check")
+def check_monitor_now(monitor_id: int):
+    """Manually check a website and save its result."""
+
+    db = get_db()
+
+    monitor_response = (
+        db.table("monitored_urls")
+        .select("*")
+        .eq("id", monitor_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not monitor_response.data:
+        raise HTTPException(
+            status_code=404,
+            detail="Monitor not found.",
+        )
+
+    monitor = monitor_response.data[0]
+    result = check_url(monitor["url"])
+
+    record = {
+        "url_id": monitor["id"],
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "is_success": result["is_success"],
+        "status_code": result["status_code"],
+        "response_time_ms": result["response_time_ms"],
+        "error_type": result["error_type"],
+        "error_message": result["error_message"],
+    }
+
+    try:
+        db.table("check_results").insert(record).execute()
+    except Exception as exc:
+        print(f"Could not save manual check result: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="The check ran, but its result could not be saved.",
+        )
+
+    return {
+        "monitor_id": monitor_id,
+        "url": monitor["url"],
+        **result,
+    }
+
+
+@app.delete("/monitors/{monitor_id}")
 def delete_monitor(monitor_id: int):
+    """Delete a monitor and its check history."""
+
+    db = get_db()
+
+    existing = (
+        db.table("monitored_urls")
+        .select("id")
+        .eq("id", monitor_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not existing.data:
+        raise HTTPException(
+            status_code=404,
+            detail="Monitor not found.",
+        )
+
     try:
-        existing = (
-            supabase.table("monitored_urls")
-            .select("id")
-            .eq("id", monitor_id)
-            .limit(1)
-            .execute()
-        )
+        db.table("check_results").delete().eq(
+            "url_id", monitor_id
+        ).execute()
 
-        if not existing.data:
-            raise HTTPException(
-                status_code=404,
-                detail="Monitor not found.",
-            )
+        db.table("monitored_urls").delete().eq(
+            "id", monitor_id
+        ).execute()
 
-        # Remove history first if the database has no
-        # cascading foreign-key delete configured.
-        (
-            supabase.table("check_results")
-            .delete()
-            .eq("url_id", monitor_id)
-            .execute()
-        )
-
-        (
-            supabase.table("monitored_urls")
-            .delete()
-            .eq("id", monitor_id)
-            .execute()
-        )
-
-        return {"message": "Monitor deleted successfully."}
-
-    except HTTPException:
-        raise
     except Exception as exc:
-        print(f"DELETE /monitors/{monitor_id} failed: {exc}")
+        print(f"Could not delete monitor: {exc}")
         raise HTTPException(
             status_code=500,
-            detail="Could not delete monitor.",
+            detail="Could not delete monitor. Check backend logs.",
         )
 
+    return {
+        "success": True,
+        "message": "Monitor and its history deleted.",
+    }
 
-# --------------------------------------------------
-# 9. Get check history for a monitor
-# --------------------------------------------------
 
-
-@app.get(
-    "/monitors/{monitor_id}/checks",
-    responses={
-        404: {"description": "Monitor not found."},
-        500: {"description": "Could not retrieve check history."},
-    },
-)
+@app.get("/monitors/{monitor_id}/checks")
 def get_monitor_checks(monitor_id: int):
-    try:
-        existing = (
-            supabase.table("monitored_urls")
-            .select("id")
-            .eq("id", monitor_id)
-            .limit(1)
-            .execute()
-        )
+    """Return recent check history for a monitor."""
 
-        if not existing.data:
-            raise HTTPException(
-                status_code=404,
-                detail="Monitor not found.",
-            )
+    db = get_db()
 
-        response = (
-            supabase.table("check_results")
-            .select("*")
-            .eq("url_id", monitor_id)
-            .order("checked_at", desc=True)
-            .limit(100)
-            .execute()
-        )
+    existing = (
+        db.table("monitored_urls")
+        .select("id")
+        .eq("id", monitor_id)
+        .limit(1)
+        .execute()
+    )
 
-        return response.data or []
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        print(f"GET check history failed: {exc}")
+    if not existing.data:
         raise HTTPException(
-            status_code=500,
-            detail="Could not retrieve check history.",
+            status_code=404,
+            detail="Monitor not found.",
         )
+
+    response = (
+        db.table("check_results")
+        .select("*")
+        .eq("url_id", monitor_id)
+        .order("checked_at", desc=True)
+        .limit(100)
+        .execute()
+    )
+
+    return [
+        {
+            "id": item["id"],
+            "checked_at": item["checked_at"],
+            "is_up": item["is_success"],
+            "status_code": item["status_code"],
+            "response_time_ms": item["response_time_ms"],
+            "error_type": item.get("error_type"),
+            "error_message": item.get("error_message"),
+        }
+        for item in (response.data or [])
+    ]
+
+
+# --------------------------------------------------
+# 8. Browser activity endpoints
+# --------------------------------------------------
+
+@app.post("/browser-activity")
+def update_browser_activity(payload: BrowserActivityUpdate):
+    """Receive domains currently open in the Chrome extension."""
+
+    db = get_db()
+    incoming = {}
+
+    for item in payload.domains:
+        domain = item.domain.strip().lower().rstrip(".")
+
+        if (
+            not domain
+            or "/" in domain
+            or ":" in domain
+            or " " in domain
+            or item.tab_count < 0
+        ):
+            continue
+
+        if item.tab_count > 0:
+            incoming[domain] = item.tab_count
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    existing_response = (
+        db.table("browser_activity")
+        .select("domain")
+        .execute()
+    )
+
+    existing_domains = {
+        row["domain"]
+        for row in (existing_response.data or [])
+    }
+
+    for domain, tab_count in incoming.items():
+        db.table("browser_activity").upsert(
+            {
+                "domain": domain,
+                "is_open": True,
+                "tab_count": tab_count,
+                "last_seen_at": now,
+                "updated_at": now,
+            },
+            on_conflict="domain",
+        ).execute()
+
+    for domain in existing_domains - set(incoming):
+        db.table("browser_activity").update(
+            {
+                "is_open": False,
+                "tab_count": 0,
+                "updated_at": now,
+            }
+        ).eq("domain", domain).execute()
+
+    return {
+        "success": True,
+        "domains_open": len(incoming),
+    }
+
+
+@app.get("/browser-activity")
+def get_browser_activity():
+    """Return browser activity and expire stale heartbeats."""
+
+    db = get_db()
+
+    response = (
+        db.table("browser_activity")
+        .select("*")
+        .order("domain")
+        .execute()
+    )
+
+    now = datetime.now(timezone.utc)
+    results = []
+
+    for row in response.data or []:
+        is_open = bool(row.get("is_open"))
+        tab_count = row.get("tab_count", 0)
+        last_seen = row.get("last_seen_at")
+
+        if is_open:
+            try:
+                if not last_seen:
+                    raise ValueError("Missing heartbeat")
+
+                last_seen_time = datetime.fromisoformat(
+                    last_seen.replace("Z", "+00:00")
+                )
+
+                if last_seen_time.tzinfo is None:
+                    last_seen_time = last_seen_time.replace(
+                        tzinfo=timezone.utc
+                    )
+
+                if (now - last_seen_time).total_seconds() > 90:
+                    is_open = False
+
+            except (ValueError, AttributeError):
+                is_open = False
+
+        if not is_open and row.get("is_open"):
+            db.table("browser_activity").update(
+                {
+                    "is_open": False,
+                    "tab_count": 0,
+                    "updated_at": now.isoformat(),
+                }
+            ).eq("domain", row["domain"]).execute()
+
+        results.append({
+            "domain": row["domain"],
+            "is_open": is_open,
+            "tab_count": tab_count if is_open else 0,
+            "last_seen_at": last_seen,
+        })
+
+    return {"domains": results}
