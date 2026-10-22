@@ -1,155 +1,54 @@
 
-"use strict";
+const API_BASE_URL = "https://zero1-api-uptime-monitor-backend.onrender.com";
 
-// --------------------------------------------------
-// 1. API configuration
-// --------------------------------------------------
-
-const API_BASE_URL =
-    "https://zero1-api-uptime-monitor-backend.onrender.com";
-
-// --------------------------------------------------
-// 2. DOM elements
-// --------------------------------------------------
-
+// HTML elements
 const monitorForm = document.getElementById("monitor-form");
-const urlInput = document.getElementById("monitor-url");
 const nameInput = document.getElementById("monitor-name");
+const urlInput = document.getElementById("monitor-url");
+const openFormButton = document.getElementById("open-form-button");
+const cancelFormButton = document.getElementById("cancel-form-button");
+const feedback = document.getElementById("feedback");
+
 const monitorList = document.getElementById("monitor-list");
 const historyList = document.getElementById("history-list");
 const historyDescription = document.getElementById("history-description");
-const feedback = document.getElementById("feedback");
-
-const openFormButton = document.getElementById("open-form-button");
-const cancelFormButton = document.getElementById("cancel-form-button");
 
 const totalCount = document.getElementById("total-count");
 const upCount = document.getElementById("up-count");
 const downCount = document.getElementById("down-count");
 const avgResponse = document.getElementById("avg-response");
 
-// --------------------------------------------------
-// 3. State
-// --------------------------------------------------
+const connectionStatus = document.getElementById("connection-status");
+const connectionDot = document.querySelector(".status-dot");
 
 let monitors = [];
 let selectedMonitorId = null;
 
-// --------------------------------------------------
-// 4. User-friendly feedback
-// --------------------------------------------------
 
-function showFeedback(message, type = "info") {
-    if (!feedback) return;
+// ---------------------------------------------
+// General helpers
+// ---------------------------------------------
 
-    // Never show raw backend errors to dashboard users.
-    const safeMessages = {
-        success: message,
-        error: "Unable to complete your request. Please try again.",
-        info: message,
-    };
-
-    feedback.textContent =
-        safeMessages[type] || safeMessages.info;
-
-    feedback.dataset.type = type;
-    feedback.hidden = false;
+function showFeedback(message, type = "") {
+    feedback.textContent = message;
+    feedback.className = type;
 }
 
 function clearFeedback() {
-    if (!feedback) return;
-
     feedback.textContent = "";
-    feedback.hidden = true;
+    feedback.className = "";
 }
 
-// --------------------------------------------------
-// 5. API request helper
-// --------------------------------------------------
+function setConnection(connected) {
+    connectionStatus.textContent = connected
+        ? "Backend connected"
+        : "Backend unavailable";
 
-async function apiRequest(endpoint, options = {}) {
-    let response;
-
-    try {
-        response = await fetch(`${API_BASE_URL}${endpoint}`, {
-            ...options,
-            headers: {
-                "Content-Type": "application/json",
-                ...(options.headers || {}),
-            },
-        });
-    } catch (error) {
-        console.error("API request failed:", error);
-        throw new Error("NETWORK_ERROR");
+    if (connectionDot) {
+        connectionDot.style.background = connected
+            ? "#35c78a"
+            : "#e05a67";
     }
-
-    if (!response.ok) {
-        let detail = "";
-
-        try {
-            const data = await response.json();
-            detail = data.detail || "";
-        } catch {
-            // Response may not contain JSON.
-        }
-
-        console.error("API error:", response.status, detail);
-
-        const error = new Error("API_ERROR");
-        error.status = response.status;
-        error.detail = detail;
-        throw error;
-    }
-
-    if (response.status === 204) return null;
-
-    return response.json();
-}
-
-// --------------------------------------------------
-// 6. Form visibility
-// --------------------------------------------------
-
-function openMonitorForm() {
-    if (monitorForm) {
-        monitorForm.hidden = false;
-    }
-
-    if (openFormButton) {
-        openFormButton.hidden = true;
-    }
-
-    nameInput?.focus();
-}
-
-function closeMonitorForm() {
-    if (monitorForm) {
-        monitorForm.reset();
-        monitorForm.hidden = true;
-    }
-
-    if (openFormButton) {
-        openFormButton.hidden = false;
-    }
-
-    clearFeedback();
-}
-
-openFormButton?.addEventListener("click", openMonitorForm);
-cancelFormButton?.addEventListener("click", closeMonitorForm);
-
-// --------------------------------------------------
-// 7. Safe HTML rendering
-// --------------------------------------------------
-
-function escapeHTML(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#039;",
-    })[char]);
 }
 
 function formatDate(value) {
@@ -157,202 +56,221 @@ function formatDate(value) {
 
     const date = new Date(value);
 
-    if (Number.isNaN(date.getTime())) return "Never";
+    if (Number.isNaN(date.getTime())) return "Unknown";
 
     return date.toLocaleString();
 }
 
 function formatResponseTime(value) {
-    if (value === null || value === undefined) return "—";
-
-    return `${Number(value).toFixed(0)} ms`;
-}
-
-function statusLabel(status) {
-    const normalized = String(status || "unknown").toLowerCase();
-
-    if (normalized === "up") return "UP";
-    if (normalized === "down") return "DOWN";
-
-    return "UNKNOWN";
-}
-
-// --------------------------------------------------
-// 8. Dashboard statistics
-// --------------------------------------------------
-
-function updateStatistics() {
-    const up = monitors.filter(
-        (monitor) => monitor.current_status === "up"
-    ).length;
-
-    const down = monitors.filter(
-        (monitor) => monitor.current_status === "down"
-    ).length;
-
-    const responseTimes = monitors
-        .map((monitor) => monitor.response_time_ms)
-        .filter((value) => value !== null && value !== undefined)
-        .map(Number)
-        .filter(Number.isFinite);
-
-    const average = responseTimes.length
-        ? responseTimes.reduce((sum, value) => sum + value, 0) /
-          responseTimes.length
-        : null;
-
-    if (totalCount) totalCount.textContent = monitors.length;
-    if (upCount) upCount.textContent = up;
-    if (downCount) downCount.textContent = down;
-
-    if (avgResponse) {
-        avgResponse.textContent =
-            average === null ? "—" : `${Math.round(average)} ms`;
-    }
-}
-
-// --------------------------------------------------
-// 9. Render monitors
-// --------------------------------------------------
-
-function renderMonitors() {
-    if (!monitorList) return;
-
-    if (!monitors.length) {
-        monitorList.innerHTML = `
-            <tr>
-                <td colspan="6" class="empty-state">
-                    No monitors yet. Add a website to get started.
-                </td>
-            </tr>
-        `;
-
-        updateStatistics();
-        return;
+    if (value === null || value === undefined || value === "") {
+        return "—";
     }
 
-    monitorList.innerHTML = monitors.map((monitor) => {
-        const status = String(
-            monitor.current_status || "unknown"
-        ).toLowerCase();
+    const milliseconds = Number(value);
 
-        const safeStatus = ["up", "down", "unknown"].includes(status)
-            ? status
-            : "unknown";
+    if (!Number.isFinite(milliseconds)) return "—";
 
-        return `
-            <tr>
-                <td>${escapeHTML(monitor.name || monitor.url)}</td>
-
-                <td>
-                    <a href="${escapeHTML(monitor.url)}"
-                       target="_blank"
-                       rel="noopener noreferrer">
-                        ${escapeHTML(monitor.url)}
-                    </a>
-                </td>
-
-                <td>
-                    <span class="status-badge status-${safeStatus}">
-                        ${statusLabel(safeStatus)}
-                    </span>
-                </td>
-
-                <td>${formatResponseTime(monitor.response_time_ms)}</td>
-
-                <td>${escapeHTML(formatDate(monitor.last_checked_at))}</td>
-
-                <td>
-                    <button type="button"
-                            class="view-history-button"
-                            data-action="history"
-                            data-id="${escapeHTML(monitor.id)}">
-                        History
-                    </button>
-
-                    <button type="button"
-                            class="check-monitor-button"
-                            data-action="check"
-                            data-id="${escapeHTML(monitor.id)}">
-                        Check now
-                    </button>
-
-                    <button type="button"
-                            class="delete-monitor-button"
-                            data-action="delete"
-                            data-id="${escapeHTML(monitor.id)}">
-                        Delete
-                    </button>
-                </td>
-            </tr>
-        `;
-    }).join("");
-
-    updateStatistics();
+    return `${Math.round(milliseconds)} ms`;
 }
 
-// --------------------------------------------------
-// 10. Load monitors
-// --------------------------------------------------
+function normalizeStatus(monitor) {
+    const status = String(monitor.current_status || "").toLowerCase();
 
-async function loadMonitors() {
-    try {
-        const data = await apiRequest("/monitors");
+    if (status === "up" || status === "down") {
+        return status;
+    }
 
-        monitors = Array.isArray(data) ? data : [];
-        renderMonitors();
+    return "unknown";
+}
 
-        if (selectedMonitorId !== null) {
-            const stillExists = monitors.some(
-                (monitor) =>
-                    String(monitor.id) === String(selectedMonitorId)
-            );
+function statusBadge(status) {
+    const normalized = ["up", "down", "unknown"].includes(status)
+        ? status
+        : "unknown";
 
-            if (stillExists) {
-                await loadHistory(selectedMonitorId);
-            } else {
-                clearHistory();
-            }
+    const labels = {
+        up: "UP",
+        down: "DOWN",
+        unknown: "UNKNOWN"
+    };
+
+    const badge = document.createElement("span");
+    badge.className = `status-badge status-${normalized}`;
+    badge.textContent = labels[normalized];
+
+    return badge;
+}
+
+async function apiRequest(path, options = {}) {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+        ...options,
+        headers: {
+            ...(options.body
+                ? { "Content-Type": "application/json" }
+                : {}),
+            ...options.headers
+        }
+    });
+
+    if (!response.ok) {
+        let message = `Request failed (${response.status})`;
+
+        try {
+            const errorData = await response.json();
+            message = errorData.detail || message;
+        } catch {
+            // Keep the default message if the response isn't JSON.
         }
 
-        return true;
-    } catch (error) {
-        console.error("Could not load monitors:", error);
-
-        // Do not replace the whole dashboard with a technical error.
-        if (monitorList && !monitors.length) {
-            monitorList.innerHTML = `
-                <tr>
-                    <td colspan="6" class="empty-state">
-                        Monitors are temporarily unavailable.
-                        Please try again shortly.
-                    </td>
-                </tr>
-            `;
-        }
-
-        showFeedback(
-            "Unable to load monitors right now. Please try again.",
-            "error"
-        );
-
-        return false;
+        throw new Error(message);
     }
+
+    if (response.status === 204) {
+        return null;
+    }
+
+    return response.json();
 }
 
-// --------------------------------------------------
-// 11. Add monitor
-// --------------------------------------------------
 
-monitorForm?.addEventListener("submit", async (event) => {
+// ---------------------------------------------
+// Explanation beneath each monitored URL
+// ---------------------------------------------
+
+function getMonitorMessage(monitor) {
+    const status = normalizeStatus(monitor);
+    const errorType = monitor.error_type;
+    const code = monitor.status_code;
+
+    if (status === "unknown") {
+        return {
+            text: "Waiting for the first website check.",
+            type: "unknown"
+        };
+    }
+
+    if (status === "down") {
+        if (errorType === "ReservedExampleDomain") {
+            return {
+                text: "Reserved example domain — not intended for real monitoring.",
+                type: "down"
+            };
+        }
+
+        if (errorType === "InvalidOrPrivateURL") {
+            return {
+                text: "This URL doesn't exist or cannot be reached.",
+                type: "down"
+            };
+        }
+
+        if (errorType === "Timeout") {
+            return {
+                text: "Request timed out — the website did not respond in time.",
+                type: "down"
+            };
+        }
+
+        if (errorType === "HTTPServerError") {
+            return {
+                text: code
+                    ? `Server error (HTTP ${code}).`
+                    : "The website returned a server error.",
+                type: "down"
+            };
+        }
+
+        if (errorType) {
+            return {
+                text: monitor.error_message || "The website could not be reached.",
+                type: "down"
+            };
+        }
+
+        if (code !== null && code !== undefined) {
+            return {
+                text: `Website check failed (HTTP ${code}).`,
+                type: "down"
+            };
+        }
+
+        return {
+            text: monitor.error_message || "The website could not be reached.",
+            type: "down"
+        };
+    }
+
+    if (status === "up" && code === 403) {
+        return {
+            text: "Website responded, but access was denied (HTTP 403).",
+            type: "up"
+        };
+    }
+
+    if (status === "up" && code === 404) {
+        return {
+            text: "The server responded, but this page was not found (HTTP 404).",
+            type: "up"
+        };
+    }
+
+    return {
+        text: "Website is reachable.",
+        type: "up"
+    };
+}
+
+function appendMonitorMessage(urlCell, monitor) {
+    const message = getMonitorMessage(monitor);
+
+    const messageElement = document.createElement("div");
+    messageElement.className = `monitor-message monitor-message-${message.type}`;
+    messageElement.textContent = message.text;
+
+    // Inline styles keep this feature working without requiring CSS changes.
+    messageElement.style.fontSize = "12px";
+    messageElement.style.marginTop = "5px";
+    messageElement.style.lineHeight = "1.5";
+    messageElement.style.overflowWrap = "anywhere";
+
+    if (message.type === "down") {
+        messageElement.style.color = "#e05a67";
+    } else if (message.type === "up") {
+        messageElement.style.color = "#35c78a";
+    } else {
+        messageElement.style.color = "#999999";
+    }
+
+    urlCell.appendChild(messageElement);
+}
+
+
+// ---------------------------------------------
+// Add monitor form
+// ---------------------------------------------
+
+openFormButton.addEventListener("click", () => {
+    clearFeedback();
+    monitorForm.hidden = false;
+    nameInput.focus();
+});
+
+cancelFormButton.addEventListener("click", () => {
+    monitorForm.reset();
+    monitorForm.hidden = true;
+    clearFeedback();
+});
+
+monitorForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     clearFeedback();
 
-    const name = nameInput?.value.trim() || "";
-    const url = urlInput?.value.trim() || "";
+    const name = nameInput.value.trim();
+    const url = urlInput.value.trim();
 
-    if (!name || !url) {
-        showFeedback("Enter a monitor name and website URL.", "error");
+    if (!name) {
+        showFeedback("Please enter a monitor name.", "error");
+        nameInput.focus();
         return;
     }
 
@@ -361,239 +279,429 @@ monitorForm?.addEventListener("submit", async (event) => {
     try {
         parsedURL = new URL(url);
     } catch {
-        showFeedback("Please enter a valid website URL.", "error");
+        showFeedback(
+            "Please enter a valid URL, such as https://example.com.",
+            "error"
+        );
+        urlInput.focus();
         return;
     }
 
     if (!["http:", "https:"].includes(parsedURL.protocol)) {
-        showFeedback("Use a website URL starting with http:// or https://.", "error");
+        showFeedback("Only HTTP and HTTPS URLs are supported.", "error");
+        urlInput.focus();
         return;
     }
 
-    const submitButton = monitorForm.querySelector(
-        'button[type="submit"]'
-    );
-
-    if (submitButton) submitButton.disabled = true;
+    const submitButton = monitorForm.querySelector('button[type="submit"]');
+    submitButton.disabled = true;
+    submitButton.textContent = "Saving...";
 
     try {
         await apiRequest("/monitors", {
             method: "POST",
-            body: JSON.stringify({ name, url }),
+            body: JSON.stringify({
+                name,
+                url: parsedURL.href
+            })
         });
 
-        closeMonitorForm();
-        showFeedback("Monitor added successfully.", "success");
+        monitorForm.reset();
+        monitorForm.hidden = true;
+
+        showFeedback(
+            "Monitor added successfully. Waiting for the first check.",
+            "success"
+        );
 
         await loadMonitors();
     } catch (error) {
-        console.error("Could not add monitor:", error);
-
-        if (error.status === 409) {
-            showFeedback("This website is already being monitored.", "error");
-        } else if (error.status === 422) {
-            showFeedback("Please check the monitor name and website URL.", "error");
-        } else {
-            showFeedback(
-                "Unable to add this monitor right now. Please try again.",
-                "error"
-            );
-        }
+        showFeedback(
+            `Could not add monitor: ${error.message}`,
+            "error"
+        );
     } finally {
-        if (submitButton) submitButton.disabled = false;
+        submitButton.disabled = false;
+        submitButton.textContent = "Save monitor";
     }
 });
 
-// --------------------------------------------------
-// 12. Delete monitor
-// --------------------------------------------------
 
-async function deleteMonitor(monitorId) {
-    if (!confirm("Are you sure you want to delete this monitor?")) {
+// ---------------------------------------------
+// Load monitors from FastAPI
+// ---------------------------------------------
+
+async function loadMonitors() {
+    try {
+        const data = await apiRequest("/monitors");
+
+        if (!Array.isArray(data)) {
+            throw new Error("The backend returned an unexpected monitor list.");
+        }
+
+        monitors = data;
+        setConnection(true);
+
+        renderMonitors();
+        updateSummary();
+
+        if (selectedMonitorId !== null) {
+            const stillExists = monitors.some(
+                (monitor) => String(monitor.id) === String(selectedMonitorId)
+            );
+
+            if (stillExists) {
+                await loadHistory(selectedMonitorId);
+            } else {
+                selectedMonitorId = null;
+                resetHistory();
+            }
+        }
+    } catch (error) {
+        setConnection(false);
+        monitorList.replaceChildren();
+
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+
+        cell.colSpan = 5;
+        cell.className = "empty-state";
+        cell.textContent =
+            "Cannot connect to the backend. Start FastAPI and check the connection.";
+
+        row.appendChild(cell);
+        monitorList.appendChild(row);
+
+        totalCount.textContent = "—";
+        upCount.textContent = "—";
+        downCount.textContent = "—";
+        avgResponse.textContent = "—";
+
+        console.error("Failed to load monitors:", error);
+    }
+}
+
+function renderMonitors() {
+    monitorList.replaceChildren();
+
+    if (monitors.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+
+        cell.colSpan = 5;
+        cell.className = "empty-state";
+        cell.textContent =
+            "No monitors yet. Add your first endpoint to get started.";
+
+        row.appendChild(cell);
+        monitorList.appendChild(row);
         return;
     }
 
-    clearFeedback();
+    monitors.forEach((monitor) => {
+        const row = document.createElement("tr");
 
-    try {
-        await apiRequest(`/monitors/${encodeURIComponent(monitorId)}`, {
-            method: "DELETE",
+        // Monitor name
+        const nameCell = document.createElement("td");
+        nameCell.textContent = monitor.name || "Unnamed monitor";
+
+        // URL and explanation
+        const urlCell = document.createElement("td");
+        const urlLink = document.createElement("a");
+
+        urlLink.textContent = monitor.url || "No URL";
+        urlLink.href = "#";
+
+        try {
+            const parsed = new URL(monitor.url);
+
+            if (["http:", "https:"].includes(parsed.protocol)) {
+                urlLink.href = parsed.href;
+                urlLink.target = "_blank";
+                urlLink.rel = "noopener noreferrer";
+            }
+        } catch {
+            // Display malformed URLs as text.
+        }
+
+        urlCell.appendChild(urlLink);
+        appendMonitorMessage(urlCell, monitor);
+
+        // Status badge
+        const statusCell = document.createElement("td");
+        statusCell.appendChild(statusBadge(normalizeStatus(monitor)));
+
+        // Last checked
+        const checkedCell = document.createElement("td");
+        checkedCell.textContent = formatDate(monitor.last_checked_at);
+
+        // Actions
+        const actionsCell = document.createElement("td");
+
+        const historyButton = document.createElement("button");
+        historyButton.type = "button";
+        historyButton.className = "action-button";
+        historyButton.textContent = "History";
+
+        historyButton.addEventListener("click", () => {
+            selectedMonitorId = monitor.id;
+            loadHistory(monitor.id);
+
+            document.getElementById("history").scrollIntoView({
+                behavior: "smooth",
+                block: "start"
+            });
         });
 
-        if (String(selectedMonitorId) === String(monitorId)) {
-            clearHistory();
+        const checkButton = document.createElement("button");
+        checkButton.type = "button";
+        checkButton.className = "action-button";
+        checkButton.textContent = "Check now";
+        checkButton.style.marginLeft = "6px";
+
+        checkButton.addEventListener("click", async () => {
+            checkButton.disabled = true;
+            checkButton.textContent = "Checking...";
+
+            try {
+                await apiRequest(
+                    `/monitors/${encodeURIComponent(monitor.id)}/check`,
+                    { method: "POST" }
+                );
+
+                await loadMonitors();
+
+                showFeedback(
+                    `Check completed for ${monitor.name || monitor.url}.`,
+                    "success"
+                );
+            } catch (error) {
+                showFeedback(
+                    `Could not check website: ${error.message}`,
+                    "error"
+                );
+            } finally {
+                checkButton.disabled = false;
+                checkButton.textContent = "Check now";
+            }
+        });
+
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "action-button delete-button";
+        deleteButton.textContent = "Delete";
+        deleteButton.style.marginLeft = "6px";
+
+        deleteButton.addEventListener("click", () => deleteMonitor(monitor));
+
+        actionsCell.append(
+            historyButton,
+            checkButton,
+            deleteButton
+        );
+
+        row.append(
+            nameCell,
+            urlCell,
+            statusCell,
+            checkedCell,
+            actionsCell
+        );
+
+        monitorList.appendChild(row);
+    });
+}
+
+
+// ---------------------------------------------
+// Dashboard summary cards
+// ---------------------------------------------
+
+function updateSummary() {
+    const up = monitors.filter(
+        (monitor) => normalizeStatus(monitor) === "up"
+    ).length;
+
+    const down = monitors.filter(
+        (monitor) => normalizeStatus(monitor) === "down"
+    ).length;
+
+    totalCount.textContent = monitors.length;
+    upCount.textContent = up;
+    downCount.textContent = down;
+
+    const responseTimes = monitors
+        .map((monitor) => Number(monitor.response_time_ms))
+        .filter((value) => Number.isFinite(value) && value >= 0);
+
+    if (responseTimes.length > 0) {
+        const average = responseTimes.reduce(
+            (sum, value) => sum + value,
+            0
+        ) / responseTimes.length;
+
+        avgResponse.textContent = `${Math.round(average)} ms`;
+    } else {
+        avgResponse.textContent = "—";
+    }
+}
+
+
+// ---------------------------------------------
+// Delete monitor
+// ---------------------------------------------
+
+async function deleteMonitor(monitor) {
+    const name = monitor.name || monitor.url || "this monitor";
+
+    if (!window.confirm(`Are you sure you want to delete "${name}"?`)) {
+        return;
+    }
+
+    try {
+        await apiRequest(
+            `/monitors/${encodeURIComponent(monitor.id)}`,
+            { method: "DELETE" }
+        );
+
+        if (String(selectedMonitorId) === String(monitor.id)) {
+            selectedMonitorId = null;
+            resetHistory();
         }
 
         showFeedback("Monitor deleted successfully.", "success");
         await loadMonitors();
     } catch (error) {
-        console.error("Could not delete monitor:", error);
-
         showFeedback(
-            "Unable to delete this monitor right now. Please try again.",
+            `Could not delete monitor: ${error.message}`,
             "error"
         );
     }
 }
 
-// --------------------------------------------------
-// 13. Manually check monitor
-// --------------------------------------------------
 
-async function checkMonitorNow(monitorId) {
-    clearFeedback();
+// ---------------------------------------------
+// Check history
+// ---------------------------------------------
 
-    try {
-        await apiRequest(
-            `/monitors/${encodeURIComponent(monitorId)}/check`,
-            { method: "POST" }
-        );
+function resetHistory() {
+    historyDescription.textContent =
+        "Select a monitor to view its history.";
 
-        showFeedback("Website check completed.", "success");
+    historyList.replaceChildren();
 
-        await loadMonitors();
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
 
-        if (String(selectedMonitorId) === String(monitorId)) {
-            await loadHistory(monitorId);
-        }
-    } catch (error) {
-        console.error("Manual website check failed:", error);
+    cell.colSpan = 4;
+    cell.className = "empty-state";
+    cell.textContent = "No check history selected.";
 
-        showFeedback(
-            "Unable to check this website right now. Please try again.",
-            "error"
-        );
-    }
+    row.appendChild(cell);
+    historyList.appendChild(row);
 }
-
-// --------------------------------------------------
-// 14. Monitor table actions
-// --------------------------------------------------
-
-monitorList?.addEventListener("click", async (event) => {
-    const button = event.target.closest("button[data-action]");
-
-    if (!button) return;
-
-    const monitorId = button.dataset.id;
-    const action = button.dataset.action;
-
-    if (!monitorId) return;
-
-    if (action === "history") {
-        await loadHistory(monitorId);
-    } else if (action === "check") {
-        await checkMonitorNow(monitorId);
-    } else if (action === "delete") {
-        await deleteMonitor(monitorId);
-    }
-});
-
-// --------------------------------------------------
-// 15. Check history
-// --------------------------------------------------
 
 async function loadHistory(monitorId) {
-    selectedMonitorId = monitorId;
-
     const monitor = monitors.find(
         (item) => String(item.id) === String(monitorId)
     );
 
-    if (historyDescription) {
-        historyDescription.textContent = monitor
-            ? `Recent checks for ${monitor.name || monitor.url}`
-            : "Recent website checks";
-    }
+    historyDescription.textContent = monitor
+        ? `Recent checks for ${monitor.name || monitor.url}`
+        : "Loading check history...";
 
-    if (historyList) {
-        historyList.innerHTML = `
-            <tr>
-                <td colspan="5">Loading check history...</td>
-            </tr>
-        `;
-    }
+    historyList.replaceChildren();
+
+    const loadingRow = document.createElement("tr");
+    const loadingCell = document.createElement("td");
+
+    loadingCell.colSpan = 4;
+    loadingCell.className = "empty-state";
+    loadingCell.textContent = "Loading check history...";
+
+    loadingRow.appendChild(loadingCell);
+    historyList.appendChild(loadingRow);
 
     try {
         const data = await apiRequest(
             `/monitors/${encodeURIComponent(monitorId)}/checks`
         );
 
-        renderHistory(Array.isArray(data) ? data : []);
-    } catch (error) {
-        console.error("Could not load check history:", error);
-
-        if (historyList) {
-            historyList.innerHTML = `
-                <tr>
-                    <td colspan="5">
-                        Check history is temporarily unavailable.
-                    </td>
-                </tr>
-            `;
+        if (!Array.isArray(data)) {
+            throw new Error("The backend returned an unexpected history format.");
         }
+
+        if (String(selectedMonitorId) !== String(monitorId)) {
+            return;
+        }
+
+        historyList.replaceChildren();
+
+        if (data.length === 0) {
+            const row = document.createElement("tr");
+            const cell = document.createElement("td");
+
+            cell.colSpan = 4;
+            cell.className = "empty-state";
+            cell.textContent =
+                "No checks have been recorded for this monitor yet.";
+
+            row.appendChild(cell);
+            historyList.appendChild(row);
+            return;
+        }
+
+        data.forEach((check) => {
+            const row = document.createElement("tr");
+
+            const dateCell = document.createElement("td");
+            dateCell.textContent = formatDate(check.checked_at);
+
+            const statusCell = document.createElement("td");
+            const isUp = check.is_up === true;
+            const isDown = check.is_up === false;
+
+            statusCell.appendChild(
+                statusBadge(isUp ? "up" : isDown ? "down" : "unknown")
+            );
+
+            const codeCell = document.createElement("td");
+            codeCell.textContent = check.status_code ?? "—";
+
+            const timeCell = document.createElement("td");
+            timeCell.textContent = formatResponseTime(
+                check.response_time_ms
+            );
+
+            row.append(dateCell, statusCell, codeCell, timeCell);
+            historyList.appendChild(row);
+        });
+    } catch (error) {
+        if (String(selectedMonitorId) !== String(monitorId)) {
+            return;
+        }
+
+        historyList.replaceChildren();
+
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+
+        cell.colSpan = 4;
+        cell.className = "empty-state";
+        cell.textContent = `Could not load history: ${error.message}`;
+
+        row.appendChild(cell);
+        historyList.appendChild(row);
     }
 }
 
-function renderHistory(history) {
-    if (!historyList) return;
 
-    if (!history.length) {
-        historyList.innerHTML = `
-            <tr>
-                <td colspan="5">
-                    No check history yet. A result will appear after the first check.
-                </td>
-            </tr>
-        `;
-        return;
-    }
+// ---------------------------------------------
+// Start the dashboard
+// ---------------------------------------------
 
-    historyList.innerHTML = history.map((item) => {
-        const isUp = item.is_up === true;
-        const status = isUp ? "UP" : "DOWN";
+resetHistory();
+loadMonitors();
 
-        return `
-            <tr>
-                <td>${escapeHTML(formatDate(item.checked_at))}</td>
-                <td>
-                    <span class="status-badge status-${isUp ? "up" : "down"}">
-                        ${status}
-                    </span>
-                </td>
-                <td>${escapeHTML(item.status_code ?? "—")}</td>
-                <td>${escapeHTML(formatResponseTime(item.response_time_ms))}</td>
-                <td>${escapeHTML(item.error_message || "—")}</td>
-            </tr>
-        `;
-    }).join("");
-}
-
-function clearHistory() {
-    selectedMonitorId = null;
-
-    if (historyDescription) {
-        historyDescription.textContent = "Select a monitor to view its check history.";
-    }
-
-    if (historyList) {
-        historyList.innerHTML = `
-            <tr>
-                <td colspan="5">Select a monitor to view check history.</td>
-            </tr>
-        `;
-    }
-}
-
-// --------------------------------------------------
-// 16. Start dashboard
-// --------------------------------------------------
-
-document.addEventListener("DOMContentLoaded", () => {
-    loadMonitors();
-
-    // Refresh status and history periodically.
-    window.setInterval(() => {
-        loadMonitors();
-    }, 30000);
-});
+// Refresh the monitor list every 30 seconds.
+window.setInterval(loadMonitors, 30000);
